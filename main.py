@@ -57,6 +57,8 @@ def main() -> None:
         print(f"[video]  {args.input}  ->  {out_path}")
     else:
         cap = cv2.VideoCapture(args.camera)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         source_type = "webcam"
         writer = None
         print(f"[webcam] device {args.camera}")
@@ -102,15 +104,20 @@ def main() -> None:
                 break
             continue
 
-        hand = detector.detect(frame)
-        web = web_tracker.update(frame.shape[:2], hand.fingertips, hand.spread)
-        result = effect_map[active].apply(frame, web)
+        hands = detector.detect(frame)
+        hand_pairs = [(h.fingertips, h.spread) for h in hands]
+        webs = web_tracker.update_all(frame.shape[:2], hand_pairs)
+        result = effect_map[active].apply(frame, webs)
 
-        if show_debug and hand.contour is not None:
-            cv2.drawContours(result, [hand.contour], -1, (0, 220, 255), 2, cv2.LINE_AA)
-            for point in hand.fingertips:
-                cv2.circle(result, point, 7, (0, 255, 100), -1, cv2.LINE_AA)
-                cv2.circle(result, point, 11, (0, 255, 100), 1, cv2.LINE_AA)
+        if show_debug:
+            for hand in hands:
+                if hand.contour is not None:
+                    cv2.drawContours(
+                        result, [hand.contour], -1, (0, 220, 255), 2, cv2.LINE_AA
+                    )
+                for point in hand.fingertips:
+                    cv2.circle(result, point, 7, (0, 255, 100), -1, cv2.LINE_AA)
+                    cv2.circle(result, point, 11, (0, 255, 100), 1, cv2.LINE_AA)
 
         fps_now = 1.0 / max(time.time() - t0, 1e-3) if frame_idx > 0 else 0.0
         t0 = time.time()
@@ -123,9 +130,10 @@ def main() -> None:
             (255, 255, 255),
             2,
         )
+        active_count = sum(1 for w in webs if w.visible)
         cv2.putText(
             result,
-            f"Spread: {hand.spread:.2f} | {'ACTIVE' if web.visible else 'spread fingers'}",
+            f"Hands: {len(hands)} | Webs: {active_count}",
             (10, 54),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,

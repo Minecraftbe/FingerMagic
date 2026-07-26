@@ -18,8 +18,9 @@ _MODEL_URL = (
     "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 )
 _FINGERTIP_INDICES: tuple[int, ...] = (4, 8, 12, 16, 20)
-_MAX_MISSED_FRAMES = 10
+_MAX_MISSED_FRAMES = 8
 _DETECT_MAX_WIDTH = 400
+_DETECT_EVERY_N = 2
 
 type Point = tuple[int, int]
 
@@ -47,11 +48,6 @@ class HandObservation:
 
 
 def _compute_spread(landmarks: list[Any], finger_indices: tuple[int, ...]) -> float:
-    """Distance-invariant finger-spread ratio from normalized landmarks.
-
-    Returns (max_finger_x - min_finger_x) / hand_size.  Scales naturally
-    regardless of how close or far the hand is from the camera.
-    """
     wrist = landmarks[0]
     middle_tip = landmarks[12]
     hand_size = float(np.hypot(wrist.x - middle_tip.x, wrist.y - middle_tip.y))
@@ -67,21 +63,23 @@ class HandDetector:
         options = HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
             running_mode=RunningMode.VIDEO,
-            num_hands=1,
+            num_hands=2,
             min_hand_detection_confidence=0.5,
             min_hand_presence_confidence=0.5,
             min_tracking_confidence=0.5,
         )
         self._landmarker = HandLandmarker.create_from_options(options)
-        self._prev_fingertips: list[Point] = []
-        self._prev_spread = 0.0
-        self._prev_contour: np.ndarray | None = None
+        self._prev_tips: dict[int, list[Point]] = {}
         self._missed_frames = 0
         self._smooth_alpha = 0.5
         self._frame_idx = 0
+        self._cached: list[HandObservation] = []
 
-    def detect(self, frame: np.ndarray) -> HandObservation:
+    def detect(self, frame: np.ndarray) -> list[HandObservation]:
         self._frame_idx += 1
+        if self._frame_idx % _DETECT_EVERY_N != 0 and self._cached:
+            return self._cached
+
         h, w = frame.shape[:2]
 
         if w > _DETECT_MAX_WIDTH:
@@ -95,49 +93,46 @@ class HandDetector:
         result = self._landmarker.detect_for_video(mp_image, self._frame_idx * 33)
 
         if result.hand_landmarks:
-            landmarks = result.hand_landmarks[0]
+            hands: list[HandObservation] = []
+            new_tips: dict[int, list[Point]] = {}
 
-            raw_fingertips: list[Point] = []
-            all_pts: list[Point] = []
-            for i, lm in enumerate(landmarks):
-                pt = (int(lm.x * w), int(lm.y * h))
-                all_pts.append(pt)
-                if i in _FINGERTIP_INDICES:
-                    raw_fingertips.append(pt)
+            for hand_idx, landmarks in enumerate(result.hand_landmarks):
+                raw_fingertips: list[Point] = []
+                all_pts: list[Point] = []
+                for i, lm in enumerate(landmarks):
+                    pt = (int(lm.x * w), int(lm.y * h))
+                    all_pts.append(pt)
+                    if i in _FINGERTIP_INDICES:
+                        raw_fingertips.append(pt)
 
-            spread = _compute_spread(landmarks, _FINGERTIP_INDICES)
-            hull = cv2.convexHull(np.array(all_pts, dtype=np.int32))
+                spread = _compute_spread(landmarks, _FINGERTIP_INDICES)
+                hull = cv2.convexHull(np.array(all_pts, dtype=np.int32))
+                fingertips = self._smooth_hand(hand_idx, raw_fingertips)
+                new_tips[hand_idx] = fingertips
+                hands.append(HandObservation(fingertips, spread, hull))
 
-            fingertips = self._smooth(raw_fingertips)
-            self._prev_fingertips = fingertips
-            self._prev_spread = spread
-            self._prev_contour = hull
+            self._prev_tips = new_tips
+            self._cached = hands
             self._missed_frames = 0
-            return HandObservation(fingertips, spread, hull)
+            return hands
 
-        return self._recover_or_empty()
-
-    def _recover_or_empty(self) -> HandObservation:
         self._missed_frames += 1
-        if self._prev_contour is not None and self._missed_frames <= _MAX_MISSED_FRAMES:
-            return HandObservation(
-                self._prev_fingertips, self._prev_spread, self._prev_contour
-            )
-        self._prev_contour = None
-        self._prev_fingertips = []
-        self._prev_spread = 0.0
-        return HandObservation([], 0.0, None)
+        if self._missed_frames <= _MAX_MISSED_FRAMES and self._cached:
+            return self._cached
 
-    def _smooth(self, current: list[Point]) -> list[Point]:
+        self._prev_tips.clear()
+        self._cached = []
+        return []
+
+    def _smooth_hand(self, hand_idx: int, current: list[Point]) -> list[Point]:
         if not current:
             return []
-        if not self._prev_fingertips or len(self._prev_fingertips) != len(current):
-            self._prev_fingertips = current
+        prev = self._prev_tips.get(hand_idx)
+        if not prev or len(prev) != len(current):
             return current
 
         alpha = self._smooth_alpha
         smoothed: list[Point] = []
-        for (px, py), (cx, cy) in zip(self._prev_fingertips, current, strict=True):
+        for (px, py), (cx, cy) in zip(prev, current, strict=True):
             smoothed.append((int(px + alpha * (cx - px)), int(py + alpha * (cy - py))))
-        self._prev_fingertips = smoothed
         return smoothed
