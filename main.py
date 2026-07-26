@@ -3,7 +3,7 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import cast
+from typing import TypedDict, cast
 
 import cv2
 import numpy as np
@@ -55,13 +55,13 @@ class HandDetector:
             return self._smooth([])
 
         hull = cv2.convexHull(hand, returnPoints=False)
-        if hull is None or len(hull) < 3:
+        if len(hull) < 3:
             return self._smooth(_extreme_points(hand))
 
         defects = cv2.convexityDefects(hand, hull)
         candidates: list[tuple[int, int]] = []
 
-        if defects is not None:
+        if len(defects) > 0:
             for i in range(defects.shape[0]):
                 s, e, f, d = defects[i, 0]
                 depth = d / 256.0
@@ -198,7 +198,7 @@ class StarfieldEffect(_BaseEffect):
         mask = cast(np.ndarray, arg)
         h, w = frame.shape[:2]
         result = frame.copy()
-        ys, xs = np.where(mask > 0)
+        ys, _xs = np.where(mask > 0)
         if len(ys) < 10:
             return result
 
@@ -256,11 +256,20 @@ class RainbowEffect(_BaseEffect):
         return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
 
+class _Particle(TypedDict):
+    x: float
+    y: float
+    vx: float
+    vy: float
+    life: float
+    hue: int
+
+
 class ParticleEffect(_BaseEffect):
     """Sparkles emanating from fingertips."""
 
     def __init__(self) -> None:
-        self._particles: list[dict] = []
+        self._particles: list[_Particle] = []
 
     def apply(self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]) -> np.ndarray:
         return self._do_apply(frame, cast(list[tuple[int, int]], arg))
@@ -271,20 +280,20 @@ class ParticleEffect(_BaseEffect):
             for _ in range(2):
                 angle = np.random.uniform(0, 2 * np.pi)
                 speed = np.random.uniform(1.5, 5)
-                self._particles.append({
-                    'x': float(fx), 'y': float(fy),
-                    'vx': np.cos(angle) * speed,
-                    'vy': np.sin(angle) * speed,
-                    'life': np.random.uniform(0.5, 1.2),
-                    'hue': np.random.randint(0, 180),
-                })
+                self._particles.append(_Particle(
+                    x=float(fx), y=float(fy),
+                    vx=np.cos(angle) * speed,
+                    vy=np.sin(angle) * speed,
+                    life=np.random.uniform(0.5, 1.2),
+                    hue=np.random.randint(0, 180),
+                ))
 
-        alive: list[dict] = []
+        alive: list[_Particle] = []
         h, w = frame.shape[:2]
         for p in self._particles:
             p['x'] += p['vx']
             p['y'] += p['vy']
-            p['vy'] += 0.1  # gravity
+            p['vy'] += 0.1
             p['life'] -= 0.018
             if p['life'] <= 0:
                 continue
