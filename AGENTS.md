@@ -16,4 +16,5 @@
 - **格式化**：使用 `ruff format` 统一代码风格，不做手动调整。
 
 ## 版本控制
+- **提交前检查 `.gitignore`**：确保已忽略所有无需版本控制的文件（如虚拟环境 `.venv/`、`__pycache__/`、`*.pyc`、`dist/`、`build/`、`*.egg-info/`、IDE 配置目录等）。若发现遗漏，及时更新 `.gitignore` 后再提交。
 - **完成修改后立即提交并推送**（`git add -u && git commit -m "<message>" && git push`），保持远端与本地同步。
