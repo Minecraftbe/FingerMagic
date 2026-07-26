@@ -1,381 +1,341 @@
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TypeGuard
+from itertools import pairwise
+from typing import ClassVar
 
 import cv2
 import numpy as np
 
 type Point = tuple[int, int]
-type EffectArgument = np.ndarray | list[Point]
-
-
-# ============================================================
-# Mask and compositing helpers
-# ============================================================
-
-
-def _is_mask(arg: EffectArgument) -> TypeGuard[np.ndarray]:
-    return isinstance(arg, np.ndarray)
-
-
-def _is_fingertip_list(arg: EffectArgument) -> TypeGuard[list[Point]]:
-    return isinstance(arg, list)
-
-
-def polygon_mask(shape: tuple[int, int], points: list[Point]) -> np.ndarray:
-    """Compatibility fallback for callers that only have fingertip positions."""
-    mask = np.zeros(shape, dtype=np.uint8)
-    if len(points) >= 3:
-        hull = cv2.convexHull(np.array(points, dtype=np.int32))
-        cv2.fillPoly(mask, [hull], 255)
-    return mask
-
-
-def convex_hull_of(points: list[Point]) -> list[Point]:
-    if len(points) < 3:
-        return points
-    hull = cv2.convexHull(np.array(points, dtype=np.int32))
-    return [_point_from_array(point[0]) for point in hull]
-
-
-def _has_area(mask: np.ndarray) -> bool:
-    return cv2.countNonZero(mask) >= 96
-
-
-def _soft_mask(mask: np.ndarray, radius: float = 9.0) -> np.ndarray:
-    blurred = cv2.GaussianBlur(mask, (0, 0), radius)
-    return blurred.astype(np.float32) / 255.0
-
-
-def _blend(
-    base: np.ndarray, layer: np.ndarray, alpha: np.ndarray | float
-) -> np.ndarray:
-    normalized_alpha = alpha
-    if isinstance(normalized_alpha, np.ndarray) and normalized_alpha.ndim == 2:
-        normalized_alpha = np.expand_dims(normalized_alpha, axis=2)
-    mixed = (
-        base.astype(np.float32) * (1.0 - normalized_alpha)
-        + layer.astype(np.float32) * normalized_alpha
-    )
-    return np.clip(mixed, 0, 255).astype(np.uint8)
-
-
-def _add_light(
-    base: np.ndarray, light: np.ndarray, strength: float = 1.0
-) -> np.ndarray:
-    return np.clip(
-        base.astype(np.float32) + light.astype(np.float32) * strength, 0, 255
-    ).astype(np.uint8)
-
-
-def _mask_center(mask: np.ndarray) -> Point:
-    moments = cv2.moments(mask)
-    if moments["m00"] == 0:
-        return mask.shape[1] // 2, mask.shape[0] // 2
-    return int(moments["m10"] / moments["m00"]), int(moments["m01"] / moments["m00"])
-
-
-def _outline(mask: np.ndarray, width: int = 3) -> np.ndarray:
-    size = width * 2 + 1
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
-    outer = cv2.dilate(mask, kernel)
-    inner = cv2.erode(mask, kernel)
-    return cv2.subtract(outer, inner)
-
-
-def _outline_glow(
-    frame: np.ndarray,
-    mask: np.ndarray,
-    outer_color: tuple[int, int, int],
-    core_color: tuple[int, int, int],
-    pulse: float = 1.0,
-) -> np.ndarray:
-    edge = _outline(mask)
-    glow = cv2.GaussianBlur(edge, (0, 0), 13)
-    glow_layer = np.empty_like(frame)
-    glow_layer[:] = outer_color
-    result = _blend(frame, glow_layer, glow.astype(np.float32) / 255.0 * 0.48 * pulse)
-    core_layer = np.empty_like(frame)
-    core_layer[:] = core_color
-    return _blend(result, core_layer, edge.astype(np.float32) / 255.0 * 0.78)
-
-
-def _hsv_color(
-    hue: int, saturation: int = 190, value: int = 255
-) -> tuple[int, int, int]:
-    pixel = np.array([[[hue % 180, saturation, value]]], dtype=np.uint8)
-    bgr = cv2.cvtColor(pixel, cv2.COLOR_HSV2BGR)[0, 0]
-    return int(bgr[0]), int(bgr[1]), int(bgr[2])
-
-
-def _point_from_array(values: np.ndarray) -> Point:
-    return int(values[0]), int(values[1])
-
-
-# ============================================================
-# Visual effects
-# ============================================================
-
-
-class BaseEffect(ABC):
-    @abstractmethod
-    def apply(self, frame: np.ndarray, arg: EffectArgument) -> np.ndarray: ...
-
-
-class StarfieldEffect(BaseEffect):
-    """A drifting nebula and twinkling stars contained by the hand silhouette."""
-
-    def __init__(self, num_stars: int = 110) -> None:
-        self._num_stars = num_stars
-        self._rng = np.random.default_rng(2026)
-        self._stars = self._rng.random((num_stars, 4))
-        self._time = 0.0
-
-    def apply(self, frame: np.ndarray, arg: EffectArgument) -> np.ndarray:
-        if not _is_mask(arg):
-            return frame.copy()
-        mask = arg
-        if not _has_area(mask):
-            return frame.copy()
-        self._time += 0.045
-        soft = _soft_mask(mask, 10)
-        height, width = frame.shape[:2]
-        yy, xx = np.mgrid[:height, :width]
-        cx, cy = _mask_center(mask)
-        wave = np.sin((xx - cx) * 0.035 + self._time) + np.cos(
-            (yy - cy) * 0.045 - self._time * 0.8
-        )
-        nebula = np.empty_like(frame)
-        nebula[..., 0] = np.clip(102 + 35 * wave, 35, 185)
-        nebula[..., 1] = np.clip(24 + 16 * wave, 5, 88)
-        nebula[..., 2] = np.clip(92 - 25 * wave, 28, 172)
-        cosmic = _blend(frame, nebula, 0.76)
-        result = _blend(frame, cosmic, soft * 0.84)
-
-        rows, columns = np.where(mask > 0)
-        if len(rows) == 0:
-            return result
-        x = int(columns.min())
-        y = int(rows.min())
-        box_width = int(columns.max()) - x + 1
-        box_height = int(rows.max()) - y + 1
-        self._stars[:, 1] = (self._stars[:, 1] - 0.0018) % 1.0
-        self._stars[:, 3] += 0.08
-        glow = np.zeros_like(frame)
-        cores = np.zeros_like(frame)
-        for normalized_x, normalized_y, size, phase in self._stars:
-            star_x = int(x + normalized_x * max(box_width - 1, 1))
-            star_y = int(y + normalized_y * max(box_height - 1, 1))
-            if not (
-                0 <= star_x < width and 0 <= star_y < height and mask[star_y, star_x]
-            ):
-                continue
-            brightness = 0.38 + 0.62 * (np.sin(phase + self._time * 2.2) + 1.0) / 2.0
-            radius = 1 + int(size * 2.4 * brightness)
-            color = _hsv_color(102 + int(size * 34), 110, int(180 + 75 * brightness))
-            cv2.circle(glow, (star_x, star_y), radius + 3, color, -1, cv2.LINE_AA)
-            cv2.circle(
-                cores, (star_x, star_y), radius, (255, 245, 230), -1, cv2.LINE_AA
-            )
-            if brightness > 0.9:
-                cv2.line(
-                    cores,
-                    (star_x - 4, star_y),
-                    (star_x + 4, star_y),
-                    color,
-                    1,
-                    cv2.LINE_AA,
-                )
-                cv2.line(
-                    cores,
-                    (star_x, star_y - 4),
-                    (star_x, star_y + 4),
-                    color,
-                    1,
-                    cv2.LINE_AA,
-                )
-        result = _add_light(result, cv2.GaussianBlur(glow, (0, 0), 5), 0.55)
-        result = _add_light(result, cores, 0.92)
-        return _outline_glow(result, mask, (215, 68, 122), (255, 184, 168), 0.9)
-
-
-class RainbowEffect(BaseEffect):
-    """A smooth, pearlescent colour flow that retains the hand's texture."""
-
-    def __init__(self) -> None:
-        self._phase = 0.0
-
-    def apply(self, frame: np.ndarray, arg: EffectArgument) -> np.ndarray:
-        if not _is_mask(arg):
-            return frame.copy()
-        mask = arg
-        if not _has_area(mask):
-            return frame.copy()
-        self._phase = (self._phase + 2.4) % 180
-        height, width = frame.shape[:2]
-        yy, xx = np.mgrid[:height, :width]
-        ripple = 18 * np.sin(xx * 0.021 + yy * 0.012 + self._phase * 0.11)
-        hue = np.mod(xx * 0.11 - yy * 0.055 + ripple + self._phase, 180).astype(
-            np.uint8
-        )
-        saturation = np.full((height, width), 185, dtype=np.uint8)
-        value = np.clip(
-            220 + 26 * np.sin(yy * 0.035 - self._phase * 0.18), 0, 255
-        ).astype(np.uint8)
-        spectrum = cv2.cvtColor(np.dstack((hue, saturation, value)), cv2.COLOR_HSV2BGR)
-        pearlescent = _blend(frame, spectrum, 0.66)
-        soft = _soft_mask(mask, 9)
-        result = _blend(frame, pearlescent, soft * 0.7)
-
-        shimmer = np.maximum(0, np.sin((xx + yy * 0.42) * 0.075 - self._phase * 0.35))
-        white = np.full_like(frame, 255)
-        result = _blend(result, white, soft * shimmer * 0.14)
-        edge_hue = int(self._phase) % 180
-        return _outline_glow(
-            result,
-            mask,
-            _hsv_color(edge_hue + 72, 200, 245),
-            _hsv_color(edge_hue, 120, 255),
-            0.82,
-        )
 
 
 @dataclass(slots=True)
-class _Particle:
-    x: float
-    y: float
-    vx: float
-    vy: float
-    life: float
-    max_life: float
-    hue: int
+class MagicPanel:
+    corners: list[Point]
+    mask: np.ndarray
+    links: list[tuple[Point, Point]]
+    fingertips: list[Point]
+
+    @property
+    def visible(self) -> bool:
+        return len(self.corners) == 4 and cv2.countNonZero(self.mask) > 96
 
 
-class ParticleEffect(BaseEffect):
-    """Soft, luminous sparks that trail from detected fingertips."""
-
+class MagicPanelTracker:
     def __init__(self) -> None:
-        self._particles: list[_Particle] = []
-        self._previous_tips: list[Point] = []
-        self._rng = np.random.default_rng(1138)
+        self._corners: np.ndarray | None = None
+        self._last_shape = (0, 0)
+        self._missed_frames = 0
 
-    def apply(self, frame: np.ndarray, arg: EffectArgument) -> np.ndarray:
-        if not _is_fingertip_list(arg):
-            return frame.copy()
-        fingertips = arg
-        for index, (finger_x, finger_y) in enumerate(fingertips):
-            previous = (
-                self._previous_tips[index]
-                if index < len(self._previous_tips)
-                else (finger_x, finger_y)
+    def update(self, shape: tuple[int, int], fingertips: list[Point]) -> MagicPanel:
+        height, width = shape
+        if len(fingertips) < 2:
+            return self._hold_or_empty(shape)
+
+        points = np.array(fingertips, dtype=np.float32)
+        center = points.mean(axis=0)
+        direction = self._primary_direction(points)
+        normal = np.array([-direction[1], direction[0]], dtype=np.float32)
+        if normal[1] < 0:
+            normal *= -1
+
+        projected = (points - center) @ direction
+        panel_width = max(150.0, float(projected.max() - projected.min()) + 64.0)
+        panel_height = max(105.0, panel_width * 0.58)
+        panel_center = center + normal * panel_height * 0.22
+        target = np.array(
+            [
+                panel_center - direction * panel_width / 2 - normal * panel_height / 2,
+                panel_center + direction * panel_width / 2 - normal * panel_height / 2,
+                panel_center + direction * panel_width / 2 + normal * panel_height / 2,
+                panel_center - direction * panel_width / 2 + normal * panel_height / 2,
+            ],
+            dtype=np.float32,
+        )
+        target[:, 0] = np.clip(target[:, 0], 0, width - 1)
+        target[:, 1] = np.clip(target[:, 1], 0, height - 1)
+
+        if self._corners is None or self._last_shape != shape:
+            self._corners = target
+        else:
+            self._corners = self._corners * 0.58 + target * 0.42
+        self._last_shape = shape
+        self._missed_frames = 0
+
+        corners = [(int(x), int(y)) for x, y in self._corners]
+        mask = np.zeros(shape, dtype=np.uint8)
+        cv2.fillConvexPoly(mask, np.array(corners, dtype=np.int32), 255, cv2.LINE_AA)
+        ordered = sorted(
+            fingertips,
+            key=lambda point: point[0] * direction[0] + point[1] * direction[1],
+        )
+        return MagicPanel(corners, mask, list(pairwise(ordered)), fingertips)
+
+    def _hold_or_empty(self, shape: tuple[int, int]) -> MagicPanel:
+        self._missed_frames += 1
+        if self._corners is not None and self._missed_frames <= 3:
+            corners = [(int(x), int(y)) for x, y in self._corners]
+            mask = np.zeros(shape, dtype=np.uint8)
+            cv2.fillConvexPoly(
+                mask, np.array(corners, dtype=np.int32), 255, cv2.LINE_AA
             )
-            speed = float(np.hypot(finger_x - previous[0], finger_y - previous[1]))
-            emissions = 2 + min(4, int(speed / 7))
-            for _ in range(emissions):
-                angle = self._rng.uniform(-2.75, -0.4)
-                velocity = self._rng.uniform(1.2, 4.6) + speed * 0.045
-                life = self._rng.uniform(0.55, 1.1)
-                self._particles.append(
-                    _Particle(
-                        float(finger_x),
-                        float(finger_y),
-                        float(np.cos(angle) * velocity),
-                        float(np.sin(angle) * velocity),
-                        float(life),
-                        float(life),
-                        int(self._rng.integers(82, 164)),
-                    )
-                )
-        self._previous_tips = fingertips.copy()
+            return MagicPanel(corners, mask, [], [])
+        self._corners = None
+        return MagicPanel([], np.zeros(shape, dtype=np.uint8), [], [])
 
-        glow = np.zeros_like(frame)
-        cores = np.zeros_like(frame)
-        alive: list[_Particle] = []
-        height, width = frame.shape[:2]
-        for particle in self._particles:
-            particle.x += particle.vx
-            particle.y += particle.vy
-            particle.vx *= 0.985
-            particle.vy += 0.055
-            particle.life -= 0.026
-            if particle.life <= 0:
-                continue
-            if not (0 <= particle.x < width and 0 <= particle.y < height):
-                continue
-            alive.append(particle)
-            fade = particle.life / particle.max_life
-            point = (int(particle.x), int(particle.y))
-            color = _hsv_color(particle.hue, 190, int(145 + 110 * fade))
-            tail = (
-                int(particle.x - particle.vx * 4),
-                int(particle.y - particle.vy * 4),
-            )
-            cv2.line(glow, tail, point, color, 2, cv2.LINE_AA)
-            cv2.circle(glow, point, 3 + int(3 * fade), color, -1, cv2.LINE_AA)
-            cv2.circle(
-                cores, point, 1 + int(fade > 0.65), (255, 246, 225), -1, cv2.LINE_AA
-            )
-        self._particles = alive[-520:]
-        result = _add_light(frame, cv2.GaussianBlur(glow, (0, 0), 7), 0.62)
-        return _add_light(result, cores, 0.88)
+    @staticmethod
+    def _primary_direction(points: np.ndarray) -> np.ndarray:
+        if len(points) == 2:
+            direction = points[1] - points[0]
+        else:
+            centered = points - points.mean(axis=0)
+            _values, vectors = np.linalg.eigh(centered.T @ centered)
+            direction = vectors[:, -1]
+        length = float(np.linalg.norm(direction))
+        if length < 1e-5:
+            return np.array([1.0, 0.0], dtype=np.float32)
+        direction = direction / length
+        if direction[0] < 0:
+            direction *= -1
+        return direction.astype(np.float32)
 
 
-class NeonGlowEffect(BaseEffect):
-    """A dual-colour aura along the real hand outline, not the fingertip hull."""
+class MagicPanelEffect:
+    _PALETTES: ClassVar[
+        dict[
+            str, tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]
+        ]
+    ] = {
+        "arcane": ((122, 32, 12), (255, 220, 80), (255, 66, 210)),
+        "plasma": ((90, 12, 70), (255, 120, 235), (255, 225, 120)),
+        "matrix": ((32, 88, 8), (130, 255, 82), (225, 255, 185)),
+        "cosmic": ((8, 12, 42), (80, 180, 255), (200, 128, 255)),
+        "frost": ((12, 48, 80), (140, 230, 255), (200, 240, 255)),
+    }
 
-    def __init__(self) -> None:
+    def __init__(self, style: str = "arcane") -> None:
+        self._style = style
         self._phase = 0.0
 
-    def apply(self, frame: np.ndarray, arg: EffectArgument) -> np.ndarray:
-        if not _is_mask(arg):
+    def apply(self, frame: np.ndarray, panel: MagicPanel) -> np.ndarray:
+        if not panel.visible:
             return frame.copy()
-        mask = arg
-        if not _has_area(mask):
-            return frame.copy()
-        self._phase += 0.12
-        soft = _soft_mask(mask, 12)
-        tint = np.empty_like(frame)
-        tint[:] = (170, 42, 92)
-        result = _blend(frame, tint, soft * 0.16)
-        pulse = 0.82 + 0.18 * (np.sin(self._phase) + 1.0) / 2.0
-        result = _outline_glow(result, mask, (255, 45, 122), (255, 228, 145), pulse)
-        return _outline_glow(result, mask, (145, 30, 255), (240, 255, 225), 0.5)
+        self._phase += 0.11
+        base_color, line_color, accent_color = self._PALETTES[self._style]
+        x0, y0, x1, y1 = self._panel_bounds(panel.corners, frame.shape[:2])
+        result = self._draw_fingertip_glows(frame, panel.fingertips, accent_color)
+        roi = result[y0:y1, x0:x1]
+        mask = panel.mask[y0:y1, x0:x1]
+        local_corners = np.array(panel.corners, dtype=np.int32) - np.array([x0, y0])
 
+        surface = np.empty_like(roi)
+        surface[:] = base_color
+        texture = surface.copy()
+        self._draw_energy_grid(texture, line_color, accent_color)
+        self._draw_runes(texture, line_color, accent_color)
+        self._draw_panel_orbits(texture, line_color, accent_color)
 
-class MagicPortalEffect(BaseEffect):
-    """A dimensional portal with a soft background vignette and rotating plasma."""
+        soft_mask = cv2.GaussianBlur(mask, (0, 0), 5).astype(np.float32) / 255.0
+        panel_art = cv2.addWeighted(surface, 0.28, texture, 0.72, 0)
+        blended = cv2.addWeighted(roi, 0.14, panel_art, 0.86, 0)
+        roi[:] = self._composite(roi, blended, soft_mask * 0.9)
 
-    def __init__(self) -> None:
-        self._angle = 0.0
+        edge = np.zeros_like(roi)
+        cv2.polylines(edge, [local_corners], True, line_color, 2, cv2.LINE_AA)
+        cv2.polylines(
+            edge,
+            [self._inset_corners(local_corners, 8)],
+            True,
+            accent_color,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.polylines(
+            edge,
+            [self._inset_corners(local_corners, 16)],
+            True,
+            line_color,
+            1,
+            cv2.LINE_AA,
+        )
+        edge_glow = cv2.GaussianBlur(edge, (0, 0), 8)
+        roi[:] = self._add_light(roi, edge_glow, 0.65)
+        roi[:] = self._add_light(roi, edge, 0.85)
 
-    def apply(self, frame: np.ndarray, arg: EffectArgument) -> np.ndarray:
-        if not _is_mask(arg):
-            return frame.copy()
-        mask = arg
-        if not _has_area(mask):
-            return frame.copy()
-        self._angle += 0.045
-        height, width = frame.shape[:2]
-        center_x, center_y = _mask_center(mask)
-        yy, xx = np.mgrid[:height, :width]
-        dx = xx - center_x
-        dy = yy - center_y
-        distance = np.hypot(dx, dy)
-        angle = np.arctan2(dy, dx)
-        swirl = angle * 4.2 - distance * 0.085 + self._angle * 2.6
-        hue = np.mod(138 + 38 * np.sin(swirl) + distance * 0.025, 180).astype(np.uint8)
-        saturation = np.full((height, width), 220, dtype=np.uint8)
-        value = np.clip(170 + 85 * np.sin(swirl * 1.5), 45, 255).astype(np.uint8)
-        plasma = cv2.cvtColor(np.dstack((hue, saturation, value)), cv2.COLOR_HSV2BGR)
+        result = self._draw_energy_beams(result, panel, accent_color, line_color)
 
-        soft = _soft_mask(mask, 11)
-        darkened = (frame.astype(np.float32) * 0.56).astype(np.uint8)
-        portal_interior = _blend(frame, plasma, 0.84)
-        result = _blend(darkened, portal_interior, soft)
-        result = _outline_glow(result, mask, (255, 42, 105), (255, 214, 128), 1.0)
+        for start, end in panel.links:
+            cv2.line(result, start, end, line_color, 2, cv2.LINE_AA)
+            cv2.circle(result, start, 6, accent_color, 1, cv2.LINE_AA)
+        if panel.links:
+            cv2.circle(result, panel.links[-1][1], 6, accent_color, 1, cv2.LINE_AA)
 
-        ring = _outline(mask, 8)
-        ring_blur = cv2.GaussianBlur(ring, (0, 0), 4)
-        ring_layer = np.empty_like(frame)
-        ring_layer[:] = (255, 150, 44)
-        return _blend(result, ring_layer, ring_blur.astype(np.float32) / 255.0 * 0.5)
+        return result
+
+    def _draw_fingertip_glows(
+        self,
+        frame: np.ndarray,
+        fingertips: list[Point],
+        accent: tuple[int, int, int],
+    ) -> np.ndarray:
+        result = frame.copy()
+        glow_layer = np.zeros_like(result)
+        for x, y in fingertips:
+            cv2.circle(glow_layer, (x, y), 18, accent, -1, cv2.LINE_AA)
+            cv2.circle(glow_layer, (x, y), 28, accent, -1, cv2.LINE_AA)
+        glow = cv2.GaussianBlur(glow_layer, (0, 0), 15)
+        return self._add_light(result, glow, 0.55)
+
+    def _draw_energy_beams(
+        self,
+        frame: np.ndarray,
+        panel: MagicPanel,
+        accent: tuple[int, int, int],
+        line: tuple[int, int, int],
+    ) -> np.ndarray:
+        result = frame.copy()
+        if len(panel.corners) != 4 or not panel.fingertips:
+            return result
+
+        panel_center = np.mean(panel.corners, axis=0).astype(np.int32)
+        center = (int(panel_center[0]), int(panel_center[1]))
+        beam_layer = np.zeros_like(result, dtype=np.float32)
+        phase = self._phase
+
+        for i, (fx, fy) in enumerate(panel.fingertips):
+            offset = int(np.sin(phase * 3.7 + i * 1.2) * 12)
+            mid_x = (fx + center[0]) // 2 + offset
+            mid_y = (fy + center[1]) // 2 + offset
+
+            pts = np.array([(fx, fy), (mid_x, mid_y), center], dtype=np.int32).reshape(
+                (-1, 1, 2)
+            )
+            cv2.polylines(
+                beam_layer.astype(np.uint8),
+                [pts],
+                False,
+                accent,
+                1,
+                cv2.LINE_AA,
+            )
+
+            pulse = 0.35 + 0.25 * np.sin(phase * 2.5 + i)
+            cv2.circle(
+                beam_layer.astype(np.uint8),
+                (mid_x, mid_y),
+                int(4 + pulse * 6),
+                line,
+                -1,
+                cv2.LINE_AA,
+            )
+
+        beam_blur = cv2.GaussianBlur(beam_layer, (0, 0), 6)
+        return self._add_light(result, beam_blur.astype(np.uint8), 0.4)
+
+    def _draw_energy_grid(
+        self,
+        texture: np.ndarray,
+        line_color: tuple[int, int, int],
+        accent_color: tuple[int, int, int],
+    ) -> None:
+        height, width = texture.shape[:2]
+        offset = int((self._phase * 42) % 28)
+        for x in range(-height + offset, width + height, 28):
+            cv2.line(texture, (x, 0), (x + height, height), line_color, 1, cv2.LINE_AA)
+        for y in range(offset - height, height + width, 30):
+            cv2.line(
+                texture,
+                (0, y),
+                (width, y - width),
+                accent_color,
+                1,
+                cv2.LINE_AA,
+            )
+
+        center = (width // 2, height // 2)
+        base_radius = max(26, min(width, height) // 4)
+        for idx, mult in enumerate((1.0, 0.68, 0.36)):
+            cv2.ellipse(
+                texture,
+                center,
+                (int(base_radius * mult), int(base_radius * mult * 0.62)),
+                int(self._phase * (36 + idx * 11)),
+                0,
+                360,
+                line_color,
+                1,
+                cv2.LINE_AA,
+            )
+
+    def _draw_runes(
+        self,
+        texture: np.ndarray,
+        line_color: tuple[int, int, int],
+        accent_color: tuple[int, int, int],
+    ) -> None:
+        height, width = texture.shape[:2]
+        center_x, center_y = width // 2, height // 2
+        orbit = max(22, min(width, height) // 3)
+        for index in range(9):
+            angle = self._phase * 1.8 + index * (2 * np.pi / 9)
+            x = int(center_x + np.cos(angle) * orbit)
+            y = int(center_y + np.sin(angle) * orbit * 0.58)
+            cv2.circle(texture, (x, y), 4, accent_color, 1, cv2.LINE_AA)
+            cv2.line(texture, (x - 6, y), (x + 6, y), line_color, 1, cv2.LINE_AA)
+            cv2.line(texture, (x, y - 6), (x, y + 6), line_color, 1, cv2.LINE_AA)
+
+    def _draw_panel_orbits(
+        self,
+        texture: np.ndarray,
+        line_color: tuple[int, int, int],
+        accent_color: tuple[int, int, int],
+    ) -> None:
+        height, width = texture.shape[:2]
+        center_x, center_y = width // 2, height // 2
+        for layer in range(3):
+            r = max(12, min(width, height) // 4 + layer * 16)
+            angle_offset = self._phase * (24 + layer * 15)
+            for i in range(2):
+                a = np.radians(angle_offset + i * 180)
+                x = int(center_x + np.cos(a) * r * 0.7)
+                y = int(center_y + np.sin(a) * r * 0.45)
+                cv2.circle(texture, (x, y), 3, line_color, -1, cv2.LINE_AA)
+
+    @staticmethod
+    def _panel_bounds(
+        corners: list[Point], shape: tuple[int, int]
+    ) -> tuple[int, int, int, int]:
+        height, width = shape
+        xs = [point[0] for point in corners]
+        ys = [point[1] for point in corners]
+        padding = 24
+        return (
+            max(min(xs) - padding, 0),
+            max(min(ys) - padding, 0),
+            min(max(xs) + padding + 1, width),
+            min(max(ys) + padding + 1, height),
+        )
+
+    @staticmethod
+    def _inset_corners(corners: np.ndarray, pixels: int) -> np.ndarray:
+        center = corners.mean(axis=0)
+        vectors = corners.astype(np.float32) - center
+        lengths = np.linalg.norm(vectors, axis=1, keepdims=True)
+        return (
+            center + vectors * np.maximum(0, lengths - pixels) / np.maximum(lengths, 1)
+        ).astype(np.int32)
+
+    @staticmethod
+    def _composite(
+        base: np.ndarray, layer: np.ndarray, alpha: np.ndarray
+    ) -> np.ndarray:
+        mixed = (
+            base.astype(np.float32) * (1 - alpha[..., None])
+            + layer.astype(np.float32) * alpha[..., None]
+        )
+        return np.clip(mixed, 0, 255).astype(np.uint8)
+
+    @staticmethod
+    def _add_light(base: np.ndarray, light: np.ndarray, strength: float) -> np.ndarray:
+        return np.clip(
+            base.astype(np.float32) + light.astype(np.float32) * strength, 0, 255
+        ).astype(np.uint8)

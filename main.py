@@ -6,14 +6,7 @@ from pathlib import Path
 import cv2
 
 from detector import HandDetector
-from effects import (
-    BaseEffect,
-    MagicPortalEffect,
-    NeonGlowEffect,
-    ParticleEffect,
-    RainbowEffect,
-    StarfieldEffect,
-)
+from effects import MagicPanelEffect, MagicPanelTracker
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,8 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--effect",
         "-e",
-        default="starfield",
-        choices=["starfield", "rainbow", "particle", "neon", "portal", "all"],
+        default="arcane",
+        choices=["arcane", "plasma", "matrix", "cosmic", "frost"],
     )
     p.add_argument(
         "--camera", "-c", type=int, default=0, help="Camera device index (default: 0)"
@@ -75,25 +68,22 @@ def main() -> None:
 
     # ---- components ----
     detector = HandDetector()
-    effect_map: dict[str, BaseEffect] = {
-        "starfield": StarfieldEffect(),
-        "rainbow": RainbowEffect(),
-        "particle": ParticleEffect(),
-        "neon": NeonGlowEffect(),
-        "portal": MagicPortalEffect(),
+    effect_map = {
+        "arcane": MagicPanelEffect("arcane"),
+        "plasma": MagicPanelEffect("plasma"),
+        "matrix": MagicPanelEffect("matrix"),
+        "cosmic": MagicPanelEffect("cosmic"),
+        "frost": MagicPanelEffect("frost"),
     }
-
-    if args.effect == "all":
-        active = list(effect_map.keys())
-    else:
-        active = [args.effect]
+    active = args.effect
+    panel_tracker = MagicPanelTracker()
 
     paused = False
     show_debug = args.debug
     frame_idx = 0
     t0 = time.time()
 
-    print("\nKeys: 1-5 switch effect | a=all | d=debug | SPACE=pause | q=quit\n")
+    print("\nKeys: 1-5 switch panel style | d=debug | SPACE=pause | q=quit\n")
 
     while True:
         ret, frame = cap.read()
@@ -116,14 +106,8 @@ def main() -> None:
 
         hand = detector.detect(frame)
         fingertips = hand.fingertips
-
-        result = frame.copy()
-        for name in active:
-            e = effect_map[name]
-            if name == "particle":
-                result = e.apply(result, fingertips)
-            else:
-                result = e.apply(result, hand.mask)
+        panel = panel_tracker.update(frame.shape[:2], fingertips)
+        result = effect_map[active].apply(frame, panel)
 
         if show_debug and hand.contour is not None:
             cv2.drawContours(result, [hand.contour], -1, (0, 220, 255), 2, cv2.LINE_AA)
@@ -135,7 +119,7 @@ def main() -> None:
         t0 = time.time()
         cv2.putText(
             result,
-            f"FX: {'+'.join(active)}",
+            f"Panel: {active}",
             (10, 28),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -144,7 +128,7 @@ def main() -> None:
         )
         cv2.putText(
             result,
-            f"Hand: {'tracking' if hand.found else 'searching'}  |  Tips: {len(fingertips)}",
+            f"Gesture: {'ready' if panel.visible else 'show 2+ fingertips'}",
             (10, 54),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -171,17 +155,15 @@ def main() -> None:
         if key == ord(" "):
             paused = not paused
         if key == ord("1"):
-            active = ["starfield"]
+            active = "arcane"
         if key == ord("2"):
-            active = ["rainbow"]
+            active = "plasma"
         if key == ord("3"):
-            active = ["particle"]
+            active = "matrix"
         if key == ord("4"):
-            active = ["neon"]
+            active = "cosmic"
         if key == ord("5"):
-            active = ["portal"]
-        if key == ord("a"):
-            active = list(effect_map.keys())
+            active = "frost"
         if key == ord("d"):
             show_debug = not show_debug
 
