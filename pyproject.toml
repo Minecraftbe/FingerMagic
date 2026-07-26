@@ -17,3 +17,5 @@ dev = [
 [tool.pyright]
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
+venvPath = "."
+venv = ".venv"

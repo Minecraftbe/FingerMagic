@@ -13,8 +13,6 @@ from effects import (
     ParticleEffect,
     RainbowEffect,
     StarfieldEffect,
-    convex_hull_of,
-    polygon_mask,
 )
 
 
@@ -39,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--camera", "-c", type=int, default=0, help="Camera device index (default: 0)"
+    )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show the detected contour and fingertip markers",
     )
     return p
 
@@ -86,10 +89,11 @@ def main() -> None:
         active = [args.effect]
 
     paused = False
+    show_debug = args.debug
     frame_idx = 0
     t0 = time.time()
 
-    print("\nKeys: 1-5 switch effect | a=all | SPACE=pause | q=quit\n")
+    print("\nKeys: 1-5 switch effect | a=all | d=debug | SPACE=pause | q=quit\n")
 
     while True:
         ret, frame = cap.read()
@@ -110,29 +114,22 @@ def main() -> None:
                 break
             continue
 
-        fingertips = detector.find_fingertips(frame)
-        hull_pts = convex_hull_of(fingertips)
-        pmask = polygon_mask(frame.shape[:2], hull_pts)
+        hand = detector.detect(frame)
+        fingertips = hand.fingertips
 
         result = frame.copy()
         for name in active:
             e = effect_map[name]
             if name == "particle":
                 result = e.apply(result, fingertips)
-            elif name == "neon":
-                result = e.apply(result, fingertips)
             else:
-                result = e.apply(result, pmask)
+                result = e.apply(result, hand.mask)
 
-        for pt in fingertips:
-            cv2.circle(result, pt, 9, (0, 255, 100), -1)
-            cv2.circle(result, pt, 13, (0, 255, 100), 2)
-
-        if len(hull_pts) >= 2:
-            for i in range(len(hull_pts)):
-                a = hull_pts[i]
-                b = hull_pts[(i + 1) % len(hull_pts)]
-                cv2.line(result, a, b, (0, 220, 255), 3)
+        if show_debug and hand.contour is not None:
+            cv2.drawContours(result, [hand.contour], -1, (0, 220, 255), 2, cv2.LINE_AA)
+            for point in fingertips:
+                cv2.circle(result, point, 7, (0, 255, 100), -1, cv2.LINE_AA)
+                cv2.circle(result, point, 11, (0, 255, 100), 1, cv2.LINE_AA)
 
         fps_now = 1.0 / max(time.time() - t0, 1e-3) if frame_idx > 0 else 0.0
         t0 = time.time()
@@ -147,7 +144,7 @@ def main() -> None:
         )
         cv2.putText(
             result,
-            f"Fingers: {len(fingertips)}",
+            f"Hand: {'tracking' if hand.found else 'searching'}  |  Tips: {len(fingertips)}",
             (10, 54),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -185,6 +182,8 @@ def main() -> None:
             active = ["portal"]
         if key == ord("a"):
             active = list(effect_map.keys())
+        if key == ord("d"):
+            show_debug = not show_debug
 
         frame_idx += 1
 
