@@ -25,8 +25,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--effect",
         "-e",
-        default="neon",
-        choices=["arcane", "plasma", "matrix", "cosmic", "frost", "neon"],
+        default="ethereal",
+        choices=[
+            "arcane",
+            "plasma",
+            "matrix",
+            "cosmic",
+            "frost",
+            "neon",
+            "synthwave",
+            "hacker",
+            "ethereal",
+            "phoenix",
+            "aurora",
+            "void",
+            "prism",
+            "ember",
+            "ocean",
+        ],
     )
     p.add_argument(
         "--camera", "-c", type=int, default=0, help="Camera device index (default: 0)"
@@ -70,6 +86,15 @@ def main() -> None:
         "cosmic": CyberEffect("cosmic"),
         "frost": CyberEffect("frost"),
         "neon": CyberEffect("neon"),
+        "synthwave": CyberEffect("synthwave"),
+        "hacker": CyberEffect("hacker"),
+        "ethereal": CyberEffect("ethereal"),
+        "phoenix": CyberEffect("phoenix"),
+        "aurora": CyberEffect("aurora"),
+        "void": CyberEffect("void"),
+        "prism": CyberEffect("prism"),
+        "ember": CyberEffect("ember"),
+        "ocean": CyberEffect("ocean"),
     }
     active = args.effect
 
@@ -77,7 +102,9 @@ def main() -> None:
     frame_idx = 0
     t0 = time.time()
 
-    print("\nKeys: 1-6 | SPACE=pause | q=quit\n")
+    print(
+        "\nKeys: 1-8 classic | a=aurora e=ethereal m=ember o=ocean p=phoenix r=prism v=void | SPACE=pause | q=quit\n"
+    )
 
     while True:
         ret, frame = cap.read()
@@ -153,6 +180,24 @@ def main() -> None:
             active = "frost"
         if key == ord("6"):
             active = "neon"
+        if key == ord("7"):
+            active = "synthwave"
+        if key == ord("8"):
+            active = "hacker"
+        if key == ord("a"):
+            active = "aurora"
+        if key == ord("e"):
+            active = "ethereal"
+        if key == ord("m"):
+            active = "ember"
+        if key == ord("o"):
+            active = "ocean"
+        if key == ord("p"):
+            active = "phoenix"
+        if key == ord("r"):
+            active = "prism"
+        if key == ord("v"):
+            active = "void"
 
         frame_idx += 1
 
