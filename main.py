@@ -63,8 +63,10 @@ class HandDetector:
         candidates: list[tuple[int, int]] = []
 
         if len(defects) > 0:
+            has_extra_dim = defects.ndim == 3
             for i in range(defects.shape[0]):
-                s, e, f, d = defects[i, 0]
+                row = defects[i, 0] if has_extra_dim else defects[i]
+                s, e, f, d = int(row[0]), int(row[1]), int(row[2]), int(row[3])
                 depth = d / 256.0
                 if depth < DEFECT_DEPTH_THRESHOLD:
                     continue
