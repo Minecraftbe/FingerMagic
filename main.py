@@ -103,7 +103,7 @@ def main() -> None:
             continue
 
         hand = detector.detect(frame)
-        web = web_tracker.update(frame.shape[:2], hand.fingertips, hand.spread_cm)
+        web = web_tracker.update(frame.shape[:2], hand.fingertips, hand.spread)
         result = effect_map[active].apply(frame, web)
 
         if show_debug and hand.contour is not None:
@@ -125,7 +125,7 @@ def main() -> None:
         )
         cv2.putText(
             result,
-            f"Spread: {hand.spread_cm:.1f} cm | {'ACTIVE' if web.visible else 'spread fingers'}",
+            f"Spread: {hand.spread:.2f} | {'ACTIVE' if web.visible else 'spread fingers'}",
             (10, 54),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
