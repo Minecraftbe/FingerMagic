@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 
 from detector import HandDetector
-from effects import MagicPanelEffect, MagicPanelTracker
+from effects import FingerWebEffect, FingerWebTracker
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,7 +42,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
-    # ---- input source ----
     out_path: Path | None = None
     if args.input:
         cap = cv2.VideoCapture(args.input)
@@ -66,24 +65,23 @@ def main() -> None:
         print("Error: cannot open video source", file=sys.stderr)
         sys.exit(1)
 
-    # ---- components ----
     detector = HandDetector()
     effect_map = {
-        "arcane": MagicPanelEffect("arcane"),
-        "plasma": MagicPanelEffect("plasma"),
-        "matrix": MagicPanelEffect("matrix"),
-        "cosmic": MagicPanelEffect("cosmic"),
-        "frost": MagicPanelEffect("frost"),
+        "arcane": FingerWebEffect("arcane"),
+        "plasma": FingerWebEffect("plasma"),
+        "matrix": FingerWebEffect("matrix"),
+        "cosmic": FingerWebEffect("cosmic"),
+        "frost": FingerWebEffect("frost"),
     }
     active = args.effect
-    panel_tracker = MagicPanelTracker()
+    web_tracker = FingerWebTracker()
 
     paused = False
     show_debug = args.debug
     frame_idx = 0
     t0 = time.time()
 
-    print("\nKeys: 1-5 switch panel style | d=debug | SPACE=pause | q=quit\n")
+    print("\nKeys: 1-5 | d=debug | SPACE=pause | q=quit\n")
 
     while True:
         ret, frame = cap.read()
@@ -105,13 +103,12 @@ def main() -> None:
             continue
 
         hand = detector.detect(frame)
-        fingertips = hand.fingertips
-        panel = panel_tracker.update(frame.shape[:2], fingertips)
-        result = effect_map[active].apply(frame, panel)
+        web = web_tracker.update(frame.shape[:2], hand.fingertips, hand.spread_cm)
+        result = effect_map[active].apply(frame, web)
 
         if show_debug and hand.contour is not None:
             cv2.drawContours(result, [hand.contour], -1, (0, 220, 255), 2, cv2.LINE_AA)
-            for point in fingertips:
+            for point in hand.fingertips:
                 cv2.circle(result, point, 7, (0, 255, 100), -1, cv2.LINE_AA)
                 cv2.circle(result, point, 11, (0, 255, 100), 1, cv2.LINE_AA)
 
@@ -119,7 +116,7 @@ def main() -> None:
         t0 = time.time()
         cv2.putText(
             result,
-            f"Panel: {active}",
+            f"Style: {active}",
             (10, 28),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -128,7 +125,7 @@ def main() -> None:
         )
         cv2.putText(
             result,
-            f"Gesture: {'ready' if panel.visible else 'show 2+ fingertips'}",
+            f"Spread: {hand.spread_cm:.1f} cm | {'ACTIVE' if web.visible else 'spread fingers'}",
             (10, 54),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
