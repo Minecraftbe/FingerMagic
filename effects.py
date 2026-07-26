@@ -232,8 +232,10 @@ class MagicPortalEffect(BaseEffect):
 
         alpha = 0.35
         roi = mask > 0
-        result[roi] = cv2.addWeighted(
-            result[roi], 1 - alpha, gradient_bgr[roi], alpha, 0
+        blended = (
+            result[roi].astype(np.float32) * (1 - alpha)
+            + gradient_bgr[roi].astype(np.float32) * alpha
         )
+        result[roi] = np.clip(blended, 0, 255).astype(np.uint8)
 
         return result
