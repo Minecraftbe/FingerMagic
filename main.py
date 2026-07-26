@@ -9,83 +9,171 @@ import cv2
 import numpy as np
 
 # ============================================================
-# Skin detection parameters
-# ============================================================
-SKIN_HSV_LOWER = np.array([0, 20, 70], dtype=np.uint8)
-SKIN_HSV_UPPER = np.array([25, 255, 255], dtype=np.uint8)
-SKIN_YCRCB_LOWER = np.array([0, 133, 77], dtype=np.uint8)
-SKIN_YCRCB_UPPER = np.array([255, 173, 127], dtype=np.uint8)
-
-MIN_CONTOUR_AREA = 4000
-DEFECT_DEPTH_THRESHOLD = 30
-FINGER_ANGLE_MAX = 80  # degrees, defect angle must be below this to be a finger gap
-
-
-# ============================================================
 # Hand / Fingertip Detector
 # ============================================================
 
+_SKIN_YCRCB_LOWER = np.array([0, 133, 77], dtype=np.uint8)
+_SKIN_YCRCB_UPPER = np.array([255, 173, 127], dtype=np.uint8)
+_SKIN_HSV_LOWER = np.array([0, 15, 60], dtype=np.uint8)
+_SKIN_HSV_UPPER = np.array([25, 255, 255], dtype=np.uint8)
+
+_MIN_AREA = 6000
+_MIN_DEFECT_DEPTH = 20
+_MAX_DEFECT_ANGLE = 85  # degrees
+_CLUSTER_RADIUS = 50
+
 
 class HandDetector:
-    """Detects hands and fingertips using skin-color segmentation + contour convexity."""
+    """Detects fingertips using improved skin-color segmentation + contour geometry."""
 
     def __init__(self) -> None:
-        self._kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        self._kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        self._kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         self._prev_fingertips: list[tuple[int, int]] = []
-        self._smooth_alpha = 0.4
-
-    def detect_skin_mask(self, frame: np.ndarray) -> np.ndarray:
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
-        mask_hsv = cv2.inRange(hsv, SKIN_HSV_LOWER, SKIN_HSV_UPPER)
-        mask_ycrcb = cv2.inRange(ycrcb, SKIN_YCRCB_LOWER, SKIN_YCRCB_UPPER)
-        mask = cv2.bitwise_or(mask_hsv, mask_ycrcb)
-        mask = cv2.erode(mask, self._kernel, iterations=1)
-        mask = cv2.dilate(mask, self._kernel, iterations=2)
-        mask = cv2.GaussianBlur(mask, (5, 5), 0)
-        return mask
+        self._smooth_alpha = 0.35
 
     def find_fingertips(self, frame: np.ndarray) -> list[tuple[int, int]]:
-        mask = self.detect_skin_mask(frame)
+        mask = self._skin_mask(frame)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return self._smooth([])
 
-        hand = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(hand) < MIN_CONTOUR_AREA:
+        # Filter and sort valid hand contours
+        valid: list[tuple[np.ndarray, float]] = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < _MIN_AREA:
+                continue
+            if not self._is_hand_shape(c, area):
+                continue
+            valid.append((c, area))
+
+        if not valid:
             return self._smooth([])
 
-        hull = cv2.convexHull(hand, returnPoints=False)
-        if len(hull) < 3:
-            return self._smooth(_extreme_points(hand))
+        valid.sort(key=lambda x: x[1], reverse=True)
+        hand = valid[0][0]
+        return self._smooth(self._extract_fingertips(hand, frame.shape[0]))
 
-        defects = cv2.convexityDefects(hand, hull)
+    def _skin_mask(self, frame: np.ndarray) -> np.ndarray:
+        ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.bitwise_or(
+            cv2.inRange(ycrcb, _SKIN_YCRCB_LOWER, _SKIN_YCRCB_UPPER),
+            cv2.inRange(hsv, _SKIN_HSV_LOWER, _SKIN_HSV_UPPER),
+        )
+        mask = cv2.erode(mask, self._kernel_small, iterations=1)
+        mask = cv2.dilate(mask, self._kernel_large, iterations=2)
+        mask = cv2.medianBlur(mask, 5)
+        return mask
+
+    @staticmethod
+    def _is_hand_shape(contour: np.ndarray, area: float) -> bool:
+        _x, _y, w, h = cv2.boundingRect(contour)
+        aspect = w / max(h, 1)
+        if aspect < 0.25 or aspect > 3.0:
+            return False
+
+        rect_area = w * h
+        extent = area / max(rect_area, 1)
+        if extent < 0.15 or extent > 0.85:
+            return False
+
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / max(hull_area, 1)
+        if solidity < 0.3 or solidity > 0.95:
+            return False
+
+        perimeter = cv2.arcLength(contour, True)
+        circularity = 4 * np.pi * area / max(perimeter * perimeter, 1)
+        if circularity > 0.5:  # hands are not circular
+            return False
+
+        return True
+
+    def _extract_fingertips(
+        self, hand: np.ndarray, frame_h: int
+    ) -> list[tuple[int, int]]:
+        hull_pts = cv2.convexHull(hand, returnPoints=False)
+
         candidates: list[tuple[int, int]] = []
 
-        if len(defects) > 0:
-            has_extra_dim = defects.ndim == 3
-            for i in range(defects.shape[0]):
-                row = defects[i, 0] if has_extra_dim else defects[i]
-                s, e, f, d = int(row[0]), int(row[1]), int(row[2]), int(row[3])
-                depth = d / 256.0
-                if depth < DEFECT_DEPTH_THRESHOLD:
+        # Method 1: convexity defects
+        if len(hull_pts) >= 3:
+            defects = cv2.convexityDefects(hand, hull_pts)
+            if len(defects) > 0:
+                has_extra_dim = defects.ndim == 3
+                for i in range(defects.shape[0]):
+                    row = defects[i, 0] if has_extra_dim else defects[i]
+                    s_idx, e_idx, f_idx, d = (
+                        int(row[0]),
+                        int(row[1]),
+                        int(row[2]),
+                        int(row[3]),
+                    )
+                    depth = d / 256.0
+                    if depth < _MIN_DEFECT_DEPTH:
+                        continue
+                    start = tuple(hand[s_idx][0])
+                    far = tuple(hand[f_idx][0])
+                    end = tuple(hand[e_idx][0])
+                    if _angle3(start, far, end) > _MAX_DEFECT_ANGLE:
+                        continue
+                    candidates.append(start)
+                    candidates.append(end)
+
+        # Method 2: extreme points (fallback / supplement)
+        pts = hand[:, 0, :]
+        centroid = np.mean(pts, axis=0)
+        cx, cy = float(centroid[0]), float(centroid[1])
+
+        # Topmost point (usually middle/index finger)
+        top_idx = int(pts[:, 1].argmin())
+        candidates.append(tuple(pts[top_idx]))
+
+        # Points furthest from centroid along the upper half
+        for p in pts:
+            px, py = float(p[0]), float(p[1])
+            if py < cy and np.hypot(px - cx, py - cy) > np.hypot(cx, cy) * 0.4:
+                candidates.append((int(px), int(py)))
+
+        # Cluster overlapping candidates
+        fingertips = self._cluster(candidates)
+        return self._filter_wrist(fingertips, frame_h)
+
+    @staticmethod
+    def _cluster(points: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        if not points:
+            return []
+        unique = list(set(points))
+        used: set[int] = set()
+        clusters: list[tuple[int, int]] = []
+        for i, p in enumerate(unique):
+            if i in used:
+                continue
+            group = [p]
+            used.add(i)
+            for j, q in enumerate(unique):
+                if j in used:
                     continue
-                start = tuple(hand[s][0])
-                far = tuple(hand[f][0])
-                end = tuple(hand[e][0])
-                angle = _angle_between(start, far, end)
-                if angle > FINGER_ANGLE_MAX:
-                    continue
-                candidates.append(start)
-                candidates.append(end)
+                if np.hypot(p[0] - q[0], p[1] - q[1]) < _CLUSTER_RADIUS:
+                    group.append(q)
+                    used.add(j)
+            clusters.append(
+                (
+                    int(np.mean([pt[0] for pt in group])),
+                    int(np.mean([pt[1] for pt in group])),
+                )
+            )
+        return clusters
 
-        if len(candidates) < 2:
-            candidates = _extreme_points(hand)
-
-        fingertips = _cluster_points(candidates, threshold=45)
-        fingertips = _filter_bottom(fingertips, frame.shape[0])
-
-        return self._smooth(fingertips)
+    @staticmethod
+    def _filter_wrist(
+        points: list[tuple[int, int]], frame_h: int
+    ) -> list[tuple[int, int]]:
+        cutoff = int(frame_h * 0.82)
+        return [p for p in points if p[1] < cutoff]
 
     def _smooth(self, current: list[tuple[int, int]]) -> list[tuple[int, int]]:
         if not current:
@@ -94,70 +182,25 @@ class HandDetector:
         if not self._prev_fingertips or len(self._prev_fingertips) != len(current):
             self._prev_fingertips = current
             return current
+        a = self._smooth_alpha
         smoothed: list[tuple[int, int]] = []
-        alpha = self._smooth_alpha
         for (px, py), (cx, cy) in zip(self._prev_fingertips, current):
-            sx = int(px * (1 - alpha) + cx * alpha)
-            sy = int(py * (1 - alpha) + cy * alpha)
-            smoothed.append((sx, sy))
+            smoothed.append((int(px * (1 - a) + cx * a), int(py * (1 - a) + cy * a)))
         self._prev_fingertips = smoothed
         return smoothed
 
 
-def _angle_between(a: tuple[int, int], b: tuple[int, int], c: tuple[int, int]) -> float:
-    """Angle ABC in degrees."""
+def _angle3(a: tuple[int, int], b: tuple[int, int], c: tuple[int, int]) -> float:
     va = np.array(a, dtype=np.float64)
     vb = np.array(b, dtype=np.float64)
     vc = np.array(c, dtype=np.float64)
     ba = va - vb
     bc = vc - vb
-    norm = np.linalg.norm(ba) * np.linalg.norm(bc)
-    if norm < 1e-6:
+    denom = np.linalg.norm(ba) * np.linalg.norm(bc)
+    if denom < 1e-8:
         return 0.0
-    cos_a = np.clip(np.dot(ba, bc) / norm, -1.0, 1.0)
+    cos_a = np.clip(np.dot(ba, bc) / denom, -1.0, 1.0)
     return float(np.degrees(np.arccos(cos_a)))
-
-
-def _extreme_points(contour: np.ndarray) -> list[tuple[int, int]]:
-    pts = contour[:, 0, :]
-    top = tuple(pts[pts[:, 1].argmin()])
-    right = tuple(pts[pts[:, 0].argmax()])
-    bottom = tuple(pts[pts[:, 1].argmax()])
-    left = tuple(pts[pts[:, 0].argmin()])
-    return [top, right, bottom, left]
-
-
-def _cluster_points(
-    points: list[tuple[int, int]], threshold: int = 40
-) -> list[tuple[int, int]]:
-    if not points:
-        return []
-    unique: list[tuple[int, int]] = list(set(points))
-    used: set[int] = set()
-    clusters: list[tuple[int, int]] = []
-    for i, p in enumerate(unique):
-        if i in used:
-            continue
-        group = [p]
-        used.add(i)
-        for j, q in enumerate(unique):
-            if j in used:
-                continue
-            if np.hypot(p[0] - q[0], p[1] - q[1]) < threshold:
-                group.append(q)
-                used.add(j)
-        cx = int(np.mean([pt[0] for pt in group]))
-        cy = int(np.mean([pt[1] for pt in group]))
-        clusters.append((cx, cy))
-    return clusters
-
-
-def _filter_bottom(
-    points: list[tuple[int, int]], frame_height: int
-) -> list[tuple[int, int]]:
-    """Remove points near the bottom edge (likely wrist, not finger)."""
-    cutoff = int(frame_height * 0.85)
-    return [p for p in points if p[1] < cutoff]
 
 
 # ============================================================
