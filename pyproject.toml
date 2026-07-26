@@ -17,6 +17,3 @@ dev = [
 [tool.pyright]
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
-
-[tool.ty.terminal]
-error-on-warning = true

@@ -25,6 +25,7 @@ FINGER_ANGLE_MAX = 80  # degrees, defect angle must be below this to be a finger
 # Hand / Fingertip Detector
 # ============================================================
 
+
 class HandDetector:
     """Detects hands and fingertips using skin-color segmentation + contour convexity."""
 
@@ -124,7 +125,9 @@ def _extreme_points(contour: np.ndarray) -> list[tuple[int, int]]:
     return [top, right, bottom, left]
 
 
-def _cluster_points(points: list[tuple[int, int]], threshold: int = 40) -> list[tuple[int, int]]:
+def _cluster_points(
+    points: list[tuple[int, int]], threshold: int = 40
+) -> list[tuple[int, int]]:
     if not points:
         return []
     unique: list[tuple[int, int]] = list(set(points))
@@ -147,7 +150,9 @@ def _cluster_points(points: list[tuple[int, int]], threshold: int = 40) -> list[
     return clusters
 
 
-def _filter_bottom(points: list[tuple[int, int]], frame_height: int) -> list[tuple[int, int]]:
+def _filter_bottom(
+    points: list[tuple[int, int]], frame_height: int
+) -> list[tuple[int, int]]:
     """Remove points near the bottom edge (likely wrist, not finger)."""
     cutoff = int(frame_height * 0.85)
     return [p for p in points if p[1] < cutoff]
@@ -156,6 +161,7 @@ def _filter_bottom(points: list[tuple[int, int]], frame_height: int) -> list[tup
 # ============================================================
 # Polygon helpers
 # ============================================================
+
 
 def polygon_mask(shape: tuple[int, int], points: list[tuple[int, int]]) -> np.ndarray:
     """Binary mask for the convex hull of fingertip points."""
@@ -180,9 +186,12 @@ def convex_hull_of(points: list[tuple[int, int]]) -> list[tuple[int, int]]:
 # Visual Effects
 # ============================================================
 
+
 class _BaseEffect(ABC):
     @abstractmethod
-    def apply(self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]) -> np.ndarray: ...
+    def apply(
+        self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]
+    ) -> np.ndarray: ...
 
 
 class StarfieldEffect(_BaseEffect):
@@ -194,7 +203,9 @@ class StarfieldEffect(_BaseEffect):
         self._phases: np.ndarray | None = None
         self._last_shape: tuple[int, int] = (0, 0)
 
-    def apply(self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]) -> np.ndarray:
+    def apply(
+        self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]
+    ) -> np.ndarray:
         mask = cast(np.ndarray, arg)
         h, w = frame.shape[:2]
         result = frame.copy()
@@ -231,10 +242,12 @@ class StarfieldEffect(_BaseEffect):
         return result
 
     def _init(self, w: int, h: int) -> None:
-        self._stars = np.column_stack([
-            np.random.randint(0, w, self.num_stars),
-            np.random.randint(0, h, self.num_stars),
-        ]).astype(np.float64)
+        self._stars = np.column_stack(
+            [
+                np.random.randint(0, w, self.num_stars),
+                np.random.randint(0, h, self.num_stars),
+            ]
+        ).astype(np.float64)
         self._phases = np.random.uniform(0, 2 * np.pi, self.num_stars)
         self._last_shape = (w, h)
 
@@ -245,7 +258,9 @@ class RainbowEffect(_BaseEffect):
     def __init__(self) -> None:
         self._offset = 0
 
-    def apply(self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]) -> np.ndarray:
+    def apply(
+        self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]
+    ) -> np.ndarray:
         mask = cast(np.ndarray, arg)
         self._offset = (self._offset + 3) % 180
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.int16)
@@ -271,37 +286,48 @@ class ParticleEffect(_BaseEffect):
     def __init__(self) -> None:
         self._particles: list[_Particle] = []
 
-    def apply(self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]) -> np.ndarray:
+    def apply(
+        self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]
+    ) -> np.ndarray:
         return self._do_apply(frame, cast(list[tuple[int, int]], arg))
 
-    def _do_apply(self, frame: np.ndarray, fingertips: list[tuple[int, int]]) -> np.ndarray:
+    def _do_apply(
+        self, frame: np.ndarray, fingertips: list[tuple[int, int]]
+    ) -> np.ndarray:
         result = frame.copy()
         for fx, fy in fingertips:
             for _ in range(2):
                 angle = np.random.uniform(0, 2 * np.pi)
                 speed = np.random.uniform(1.5, 5)
-                self._particles.append(_Particle(
-                    x=float(fx), y=float(fy),
-                    vx=np.cos(angle) * speed,
-                    vy=np.sin(angle) * speed,
-                    life=np.random.uniform(0.5, 1.2),
-                    hue=np.random.randint(0, 180),
-                ))
+                self._particles.append(
+                    _Particle(
+                        x=float(fx),
+                        y=float(fy),
+                        vx=np.cos(angle) * speed,
+                        vy=np.sin(angle) * speed,
+                        life=np.random.uniform(0.5, 1.2),
+                        hue=np.random.randint(0, 180),
+                    )
+                )
 
         alive: list[_Particle] = []
         h, w = frame.shape[:2]
         for p in self._particles:
-            p['x'] += p['vx']
-            p['y'] += p['vy']
-            p['vy'] += 0.1
-            p['life'] -= 0.018
-            if p['life'] <= 0:
+            p["x"] += p["vx"]
+            p["y"] += p["vy"]
+            p["vy"] += 0.1
+            p["life"] -= 0.018
+            if p["life"] <= 0:
                 continue
-            x, y = int(p['x']), int(p['y'])
+            x, y = int(p["x"]), int(p["y"])
             if 0 <= x < w and 0 <= y < h:
-                alpha = float(p['life'])
-                color_hsv = np.array([[[p['hue'], 200, int(255 * alpha)]]], dtype=np.uint8)
-                color_bgr = tuple(int(c) for c in cv2.cvtColor(color_hsv, cv2.COLOR_HSV2BGR)[0, 0])
+                alpha = float(p["life"])
+                color_hsv = np.array(
+                    [[[p["hue"], 200, int(255 * alpha)]]], dtype=np.uint8
+                )
+                color_bgr = tuple(
+                    int(c) for c in cv2.cvtColor(color_hsv, cv2.COLOR_HSV2BGR)[0, 0]
+                )
                 radius = int(3 * alpha) + 1
                 cv2.circle(result, (x, y), radius, color_bgr, -1)
                 alive.append(p)
@@ -313,7 +339,9 @@ class ParticleEffect(_BaseEffect):
 class NeonGlowEffect(_BaseEffect):
     """Glowing neon edges for the fingertip polygon."""
 
-    def apply(self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]) -> np.ndarray:
+    def apply(
+        self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]
+    ) -> np.ndarray:
         points = cast(list[tuple[int, int]], arg)
         result = frame.copy()
         hull = convex_hull_of(points)
@@ -336,7 +364,9 @@ class MagicPortalEffect(_BaseEffect):
     def __init__(self) -> None:
         self._angle = 0.0
 
-    def apply(self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]) -> np.ndarray:
+    def apply(
+        self, frame: np.ndarray, arg: np.ndarray | list[tuple[int, int]]
+    ) -> np.ndarray:
         mask = cast(np.ndarray, arg)
         self._angle += 0.03
         h, w = frame.shape[:2]
@@ -360,7 +390,9 @@ class MagicPortalEffect(_BaseEffect):
 
         alpha = 0.35
         roi = mask > 0
-        result[roi] = cv2.addWeighted(result[roi], 1 - alpha, gradient_bgr[roi], alpha, 0)
+        result[roi] = cv2.addWeighted(
+            result[roi], 1 - alpha, gradient_bgr[roi], alpha, 0
+        )
 
         return result
 
@@ -369,13 +401,29 @@ class MagicPortalEffect(_BaseEffect):
 # Main loop
 # ============================================================
 
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="FingerMagic — fingertip detection with visual FX")
-    p.add_argument("--input", "-i", default=None, help="Input video file (default: webcam)")
-    p.add_argument("--output", "-o", default="output", help="Output directory for video (default: output/)")
-    p.add_argument("--effect", "-e", default="starfield",
-                   choices=["starfield", "rainbow", "particle", "neon", "portal", "all"])
-    p.add_argument("--camera", "-c", type=int, default=0, help="Camera device index (default: 0)")
+    p = argparse.ArgumentParser(
+        description="FingerMagic — fingertip detection with visual FX"
+    )
+    p.add_argument(
+        "--input", "-i", default=None, help="Input video file (default: webcam)"
+    )
+    p.add_argument(
+        "--output",
+        "-o",
+        default="output",
+        help="Output directory for video (default: output/)",
+    )
+    p.add_argument(
+        "--effect",
+        "-e",
+        default="starfield",
+        choices=["starfield", "rainbow", "particle", "neon", "portal", "all"],
+    )
+    p.add_argument(
+        "--camera", "-c", type=int, default=0, help="Camera device index (default: 0)"
+    )
     return p
 
 
@@ -477,12 +525,33 @@ def main() -> None:
         # HUD
         fps_now = 1.0 / max(time.time() - t0, 1e-3) if frame_idx > 0 else 0.0
         t0 = time.time()
-        cv2.putText(result, f"FX: {'+'.join(active)}", (10, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(result, f"Fingers: {len(fingertips)}", (10, 54),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(result, f"FPS: {fps_now:.1f}", (10, 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(
+            result,
+            f"FX: {'+'.join(active)}",
+            (10, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
+        cv2.putText(
+            result,
+            f"Fingers: {len(fingertips)}",
+            (10, 54),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
+        cv2.putText(
+            result,
+            f"FPS: {fps_now:.1f}",
+            (10, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
 
         if writer:
             writer.write(result)
