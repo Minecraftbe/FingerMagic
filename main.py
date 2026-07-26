@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 
 from detector import HandDetector
-from effects import FingerWebEffect, FingerWebTracker
+from effects import CyberEffect
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,16 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--effect",
         "-e",
-        default="arcane",
-        choices=["arcane", "plasma", "matrix", "cosmic", "frost"],
+        default="neon",
+        choices=["arcane", "plasma", "matrix", "cosmic", "frost", "neon"],
     )
     p.add_argument(
         "--camera", "-c", type=int, default=0, help="Camera device index (default: 0)"
-    )
-    p.add_argument(
-        "--debug",
-        action="store_true",
-        help="Show the detected contour and fingertip markers",
     )
     return p
 
@@ -69,21 +64,20 @@ def main() -> None:
 
     detector = HandDetector()
     effect_map = {
-        "arcane": FingerWebEffect("arcane"),
-        "plasma": FingerWebEffect("plasma"),
-        "matrix": FingerWebEffect("matrix"),
-        "cosmic": FingerWebEffect("cosmic"),
-        "frost": FingerWebEffect("frost"),
+        "arcane": CyberEffect("arcane"),
+        "plasma": CyberEffect("plasma"),
+        "matrix": CyberEffect("matrix"),
+        "cosmic": CyberEffect("cosmic"),
+        "frost": CyberEffect("frost"),
+        "neon": CyberEffect("neon"),
     }
     active = args.effect
-    web_tracker = FingerWebTracker()
 
     paused = False
-    show_debug = args.debug
     frame_idx = 0
     t0 = time.time()
 
-    print("\nKeys: 1-5 | d=debug | SPACE=pause | q=quit\n")
+    print("\nKeys: 1-6 | SPACE=pause | q=quit\n")
 
     while True:
         ret, frame = cap.read()
@@ -105,19 +99,8 @@ def main() -> None:
             continue
 
         hands = detector.detect(frame)
-        hand_pairs = [(h.fingertips, h.spread) for h in hands]
-        webs = web_tracker.update_all(frame.shape[:2], hand_pairs)
-        result = effect_map[active].apply(frame, webs)
-
-        if show_debug:
-            for hand in hands:
-                if hand.contour is not None:
-                    cv2.drawContours(
-                        result, [hand.contour], -1, (0, 220, 255), 2, cv2.LINE_AA
-                    )
-                for point in hand.fingertips:
-                    cv2.circle(result, point, 7, (0, 255, 100), -1, cv2.LINE_AA)
-                    cv2.circle(result, point, 11, (0, 255, 100), 1, cv2.LINE_AA)
+        fingertips_list = [h.fingertips for h in hands]
+        result = effect_map[active].apply(frame, fingertips_list)
 
         fps_now = 1.0 / max(time.time() - t0, 1e-3) if frame_idx > 0 else 0.0
         t0 = time.time()
@@ -130,10 +113,9 @@ def main() -> None:
             (255, 255, 255),
             2,
         )
-        active_count = sum(1 for w in webs if w.visible)
         cv2.putText(
             result,
-            f"Hands: {len(hands)} | Webs: {active_count}",
+            f"Hands: {len(hands)}",
             (10, 54),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -169,8 +151,8 @@ def main() -> None:
             active = "cosmic"
         if key == ord("5"):
             active = "frost"
-        if key == ord("d"):
-            show_debug = not show_debug
+        if key == ord("6"):
+            active = "neon"
 
         frame_idx += 1
 
